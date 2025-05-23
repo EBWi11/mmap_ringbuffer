@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"sync"
-	"sync/atomic"
 	"syscall"
 )
 
@@ -24,15 +23,18 @@ var (
 // Memory layout:
 // [magic(4)][head(4)][tail(4)][data...]
 type RingBuffer struct {
-	buf        []byte
-	size       int
-	writeMu    sync.Mutex // Write lock
-	writeCount uint64
-	closed     bool
+	buf     []byte
+	size    int
+	writeMu sync.Mutex // Write lock
+	closed  bool
 }
 
 // NewRingBuffer creates a new mmap-backed ring buffer file
 func NewRingBuffer(mmapFileName string, size int, remove bool) (*RingBuffer, error) {
+	if size <= headerSize {
+		return nil, errors.New("buffer size must be larger than header size")
+	}
+
 	if remove {
 		_ = os.Remove(mmapFileName)
 	}
@@ -170,10 +172,6 @@ func (r *RingBuffer) WriteMsg(msg []byte) (bool, error) {
 
 	// Update head pointer
 	r.setHead(writeEnd)
-
-	// Update write count
-	atomic.AddUint64(&r.writeCount, 1)
-
 	return true, nil
 }
 
@@ -196,16 +194,13 @@ func (r *RingBuffer) ReadMsg() ([]byte, error) {
 	}
 
 	msgLen := binary.LittleEndian.Uint32(r.buf[tail : tail+4])
-
 	readEnd := tail + 4 + msgLen
-	var msg []byte
+	msg := make([]byte, msgLen)
 	if readEnd < size-1 {
-		msg = make([]byte, msgLen)
 		copy(msg, r.buf[tail+4:readEnd])
 	} else {
 		firstPart := size - tail - 4 - 1
 		secondPart := msgLen - firstPart + 1
-		msg = make([]byte, msgLen)
 		if secondPart > 0 {
 			copy(msg[:firstPart], r.buf[tail+4:size-1])
 			copy(msg[firstPart:], r.buf[headerSize:headerSize+secondPart])
@@ -215,7 +210,6 @@ func (r *RingBuffer) ReadMsg() ([]byte, error) {
 
 	// Update tail pointer
 	r.setTail(readEnd)
-
 	return msg, nil
 }
 
