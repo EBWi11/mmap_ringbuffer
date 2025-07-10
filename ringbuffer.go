@@ -26,6 +26,7 @@ type RingBuffer struct {
 	buf     []byte
 	size    int
 	writeMu sync.Mutex // Write lock
+	readMu  sync.Mutex // Read lock
 	closed  bool
 }
 
@@ -129,7 +130,13 @@ func (r *RingBuffer) WriteMsg(msg []byte) (bool, error) {
 	}
 
 	msgLen := uint32(len(msg))
-	if msgLen == 0 || msgLen > uint32(r.size)/2 {
+	if msgLen == 0 {
+		return false, ErrInvalidSize
+	}
+
+	// Message should not be larger than buffer capacity minus header and length field
+	maxMsgSize := uint32(r.size) - headerSize - 4
+	if msgLen > maxMsgSize {
 		return false, ErrInvalidSize
 	}
 
@@ -137,11 +144,13 @@ func (r *RingBuffer) WriteMsg(msg []byte) (bool, error) {
 	size := uint32(r.size)
 
 	// Calculate available space
+	// We need to keep at least 1 byte difference between head and tail
+	// to distinguish between empty and full buffer
 	var free uint32
 	if head >= tail {
-		free = (size - head) + (tail - headerSize) - 1
+		free = (size - head) + (tail - headerSize)
 	} else {
-		free = tail - head - 1
+		free = tail - head
 	}
 
 	need := 4 + msgLen
@@ -149,25 +158,29 @@ func (r *RingBuffer) WriteMsg(msg []byte) (bool, error) {
 		return false, ErrBufferFull
 	}
 
-	// Write message length
-	if head+4 > size-1 {
+	// Check if we need to wrap around for the message length
+	if head+4 > size {
 		head = headerSize
+		r.setHead(head)
 	}
 
+	// Write message length first
 	binary.LittleEndian.PutUint32(r.buf[head:head+4], msgLen)
 
-	// Write message content
-	writeEnd := head + 4 + msgLen
-	if writeEnd < size-1 {
-		copy(r.buf[head+4:writeEnd], msg)
+	// Calculate write position for message content
+	writeStart := head + 4
+	writeEnd := writeStart + msgLen
+
+	// Handle wrap-around for message content
+	if writeEnd < size {
+		// No wrap-around needed
+		copy(r.buf[writeStart:writeEnd], msg)
 	} else {
-		firstPart := size - head - 4 - 1
-		secondPart := msgLen - firstPart + 1
-		if secondPart > 0 {
-			copy(r.buf[head+4:size], msg[:firstPart])
-			copy(r.buf[headerSize:headerSize+secondPart], msg[firstPart:])
-		}
-		writeEnd = headerSize + secondPart
+		// Wrap-around needed
+		firstPart := size - writeStart
+		copy(r.buf[writeStart:size], msg[:firstPart])
+		copy(r.buf[headerSize:headerSize+msgLen-firstPart], msg[firstPart:])
+		writeEnd = headerSize + msgLen - firstPart
 	}
 
 	// Update head pointer
@@ -178,6 +191,9 @@ func (r *RingBuffer) WriteMsg(msg []byte) (bool, error) {
 // ReadMsg reads a message from the ring buffer
 // Returns (msg, nil) if successful, (nil, error) if failed
 func (r *RingBuffer) ReadMsg() ([]byte, error) {
+	r.readMu.Lock()
+	defer r.readMu.Unlock()
+
 	if r.closed {
 		return nil, ErrClosed
 	}
@@ -188,24 +204,30 @@ func (r *RingBuffer) ReadMsg() ([]byte, error) {
 	}
 	size := uint32(r.size)
 
-	// Read message length
-	if tail+4 > size-1 {
+	// Check if we need to wrap around for the message length
+	if tail+4 > size {
 		tail = headerSize
+		r.setTail(tail)
 	}
 
+	// Read message length
 	msgLen := binary.LittleEndian.Uint32(r.buf[tail : tail+4])
-	readEnd := tail + 4 + msgLen
+
+	// Calculate read position for message content
+	readStart := tail + 4
+	readEnd := readStart + msgLen
 	msg := make([]byte, msgLen)
-	if readEnd < size-1 {
-		copy(msg, r.buf[tail+4:readEnd])
+
+	// Handle wrap-around for message content
+	if readEnd < size {
+		// No wrap-around needed
+		copy(msg, r.buf[readStart:readEnd])
 	} else {
-		firstPart := size - tail - 4 - 1
-		secondPart := msgLen - firstPart + 1
-		if secondPart > 0 {
-			copy(msg[:firstPart], r.buf[tail+4:size-1])
-			copy(msg[firstPart:], r.buf[headerSize:headerSize+secondPart])
-		}
-		readEnd = headerSize + secondPart
+		// Wrap-around needed
+		firstPart := size - readStart
+		copy(msg[:firstPart], r.buf[readStart:size])
+		copy(msg[firstPart:], r.buf[headerSize:headerSize+msgLen-firstPart])
+		readEnd = headerSize + msgLen - firstPart
 	}
 
 	// Update tail pointer
@@ -217,6 +239,8 @@ func (r *RingBuffer) ReadMsg() ([]byte, error) {
 func (r *RingBuffer) Close() error {
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
+	r.readMu.Lock()
+	defer r.readMu.Unlock()
 	if r.closed {
 		return ErrClosed
 	}
