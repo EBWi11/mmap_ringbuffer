@@ -27,7 +27,8 @@ import (
 )
 
 func main() {
-    // Create a new ring buffer with 1MB size
+    // Create a new ring buffer backed by a 1MB mmap file.
+    // The first 8 bytes are used for the ring buffer header.
     rb, err := ringbuffer.NewRingBuffer("/tmp/rb.mmap", 1024*1024, true)
     if err != nil {
         panic(err)
@@ -116,7 +117,7 @@ func NewRingBuffer(filename string, size int, remove bool) (*RingBuffer, error)
 
 Creates a new ring buffer backed by a memory-mapped file.
 - `filename`: Path to the memory-mapped file
-- `size`: Size of the buffer in bytes
+- `size`: Total mmap file size in bytes, including the 8-byte header used for the head and tail pointers. For example, `1024` creates a 1024-byte mmap file, leaving 1016 bytes for ring buffer data and message length fields.
 - `remove`: If true, removes any existing file before creating
 
 ### OpenRingBuffer
@@ -167,8 +168,9 @@ Closes the ring buffer and releases the memory-mapped file.
 
 - The buffer size should be chosen carefully based on your use case
 - For high-throughput scenarios, consider using a larger buffer size
-- The buffer uses a header of 8 bytes (4 bytes for head, 4 bytes for tail)
-- Maximum message size is limited to half of the buffer size
+- The `size` passed to `NewRingBuffer` is the total mmap file size, not only the usable data capacity
+- The buffer uses an 8-byte header (4 bytes for head, 4 bytes for tail), so the usable data area is `size - 8` bytes
+- Each message also stores a 4-byte length prefix in the data area
 
 ## Contributing
 
